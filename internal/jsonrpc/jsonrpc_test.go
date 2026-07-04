@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestReadMessage(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///x"}}`
-	framed := "Content-Length: " + itoa(len(body)) + "\r\n\r\n" + body
+	framed := "Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
 
 	c := New(strings.NewReader(framed), io.Discard)
 	msg, err := c.ReadMessage()
@@ -113,19 +114,4 @@ func TestSendRequestIncrementsID(t *testing.T) {
 	if first.Method != "window/showDocument" {
 		t.Fatalf("method = %q", first.Method)
 	}
-}
-
-// itoa avoids importing strconv just for the framing helper.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }

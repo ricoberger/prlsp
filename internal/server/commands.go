@@ -11,6 +11,9 @@ func (s *Server) handleExecuteCommand(id *json.RawMessage, params json.RawMessag
 	var p lsp.ExecuteCommandParams
 	json.Unmarshal(params, &p)
 
+	// The cmd* handlers read and mutate shared session state (threads, gitInfo,
+	// docs), so hold the lock for the whole dispatch.
+	s.mu.Lock()
 	switch p.Command {
 	case "prlsp.resolveReviewThread":
 		s.cmdResolveReviewThread(p.Arguments)
@@ -27,13 +30,15 @@ func (s *Server) handleExecuteCommand(id *json.RawMessage, params json.RawMessag
 	case "prlsp.refreshReviewThreads":
 		s.cmdRefreshReviewThreads()
 	}
+	s.mu.Unlock()
 
 	// Always respond with null result.
 	s.conn.SendResponse(id, nil)
 }
 
 func (s *Server) cmdResolveReviewThread(args []json.RawMessage) {
-	if len(args) < 2 || s.gitInfo == nil {
+	// Resolving only needs the thread ID, so it does not depend on gitInfo.
+	if len(args) < 2 {
 		return
 	}
 	var threadID, uri string
@@ -55,7 +60,8 @@ func (s *Server) cmdResolveReviewThread(args []json.RawMessage) {
 }
 
 func (s *Server) cmdUnresolveReviewThread(args []json.RawMessage) {
-	if len(args) < 2 || s.gitInfo == nil {
+	// Unresolving only needs the thread ID, so it does not depend on gitInfo.
+	if len(args) < 2 {
 		return
 	}
 	var threadID, uri string

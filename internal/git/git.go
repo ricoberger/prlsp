@@ -7,7 +7,12 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// gitTimeout bounds each git invocation so a hung git process cannot block the
+// caller indefinitely.
+const gitTimeout = 10 * time.Second
 
 // Info describes the git context of a workspace.
 type Info struct {
@@ -18,7 +23,9 @@ type Info struct {
 }
 
 func runGit(args []string, cwd string) string {
-	cmd := exec.CommandContext(context.Background(), "git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	out, err := cmd.Output()
 	if err != nil {

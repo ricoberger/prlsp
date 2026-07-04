@@ -43,20 +43,33 @@ func TestMockUnresolveRoundTrip(t *testing.T) {
 
 func TestMockCreateReviewCommentRange(t *testing.T) {
 	mock := &ClientMock{}
-	// Swapped bounds should anchor to the larger line.
-	mock.CreateReviewCommentRange("o", "r", 1, "sha", "a.go", 9, 4, "body")
+	// A valid range anchors the thread to its end line.
+	if !mock.CreateReviewCommentRange("o", "r", 1, "sha", "a.go", 4, 9, "body") {
+		t.Fatal("valid range should be accepted")
+	}
 	if len(mock.Threads) != 1 {
 		t.Fatalf("threads = %d, want 1", len(mock.Threads))
 	}
 	if mock.Threads[0].Line != 9 {
 		t.Fatalf("line = %d, want 9", mock.Threads[0].Line)
 	}
+
+	// Swapped or non-positive bounds are rejected, matching the real client.
+	if mock.CreateReviewCommentRange("o", "r", 1, "sha", "a.go", 9, 4, "body") {
+		t.Fatal("swapped bounds should be rejected")
+	}
+	if mock.CreateReviewCommentRange("o", "r", 1, "sha", "a.go", 0, 5, "body") {
+		t.Fatal("non-positive start line should be rejected")
+	}
+	if len(mock.Threads) != 1 {
+		t.Fatalf("threads = %d, want 1 (rejected calls create nothing)", len(mock.Threads))
+	}
 }
 
 func TestParseReviewThreadsOutdated(t *testing.T) {
-	// Models the real Staffbase/mops#17025 case: a resolved Copilot comment that
-	// is outdated (line == null) but has an originalLine, alongside the other
-	// combinations we must handle.
+	// Covers every line/originalLine combination the parser must handle,
+	// including the tricky case of a resolved comment that is outdated
+	// (line == null) but still has an originalLine to anchor to.
 	const resp = `{
 	  "data": { "repository": { "pullRequest": { "reviewThreads": { "nodes": [
 	    { "id": "T_unresolved_current", "isResolved": false, "line": 10, "originalLine": 9, "path": "a.go",
@@ -88,7 +101,7 @@ func TestParseReviewThreadsOutdated(t *testing.T) {
 
 	rc, ok := got["T_resolved_outdated"]
 	if !ok {
-		t.Fatal("resolved outdated thread should be kept (regression: mops#17025)")
+		t.Fatal("resolved outdated thread should be kept")
 	}
 	if rc.Line != 6 || !rc.IsOutdated || !rc.IsResolved {
 		t.Errorf("resolved outdated = %+v, want line 6, outdated, resolved", rc)

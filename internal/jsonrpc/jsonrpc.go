@@ -94,9 +94,17 @@ func (c *Conn) writeJSON(msg any) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	fmt.Fprintf(c.writer, "Content-Length: %d\r\n\r\n", len(body))
-	c.writer.Write(body)
-	c.writer.Flush()
+	if _, err := fmt.Fprintf(c.writer, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
+		log.Printf("write header error: %v", err)
+		return
+	}
+	if _, err := c.writer.Write(body); err != nil {
+		log.Printf("write body error: %v", err)
+		return
+	}
+	if err := c.writer.Flush(); err != nil {
+		log.Printf("flush error: %v", err)
+	}
 }
 
 // SendResponse sends a response to the request identified by id. A nil result
@@ -122,7 +130,11 @@ func (c *Conn) SendResponse(id *json.RawMessage, result any) {
 
 // SendNotification sends a notification (a message without an id).
 func (c *Conn) SendNotification(method string, params any) {
-	raw, _ := json.Marshal(params)
+	raw, err := json.Marshal(params)
+	if err != nil {
+		log.Printf("marshal notification params error: %v", err)
+		return
+	}
 	c.writeJSON(Message{
 		JSONRPC: "2.0",
 		Method:  method,
@@ -130,15 +142,20 @@ func (c *Conn) SendNotification(method string, params any) {
 	})
 }
 
-// SendRequest sends a request with an auto-incrementing id. The response is not
-// tracked; callers that do not need the result can ignore it.
+// SendRequest sends a request with an auto-incrementing id. The response is
+// discarded by the read loop, so this is only useful for fire-and-forget
+// requests where the result is not needed (e.g. window/showDocument).
 func (c *Conn) SendRequest(method string, params any) {
-	raw, _ := json.Marshal(params)
+	raw, err := json.Marshal(params)
+	if err != nil {
+		log.Printf("marshal request params error: %v", err)
+		return
+	}
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
 	c.mu.Unlock()
-	idRaw, _ := json.Marshal(id)
+	idRaw, _ := json.Marshal(id) // marshaling an int cannot fail
 	rawID := json.RawMessage(idRaw)
 	c.writeJSON(Message{
 		JSONRPC: "2.0",

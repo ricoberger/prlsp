@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -86,15 +88,6 @@ func rawJSON(v any) *json.RawMessage {
 	return &r
 }
 
-func containsStr(ss []string, want string) bool {
-	for _, s := range ss {
-		if s == want {
-			return true
-		}
-	}
-	return false
-}
-
 // codeActionCommands runs handleCodeAction for a single prlsp diagnostic
 // pointing at threadID and returns the resulting actions' command names.
 func codeActionCommands(t *testing.T, s *Server, threadID string) []string {
@@ -166,6 +159,15 @@ func TestUriToRelpath(t *testing.T) {
 	if got := s.uriToRelpath("file:///other/a.go"); got != "/other/a.go" {
 		t.Fatalf("outside root = %q, want /other/a.go", got)
 	}
+	// A sibling directory that merely shares the root as a string prefix must
+	// not be treated as being inside the root.
+	if got := s.uriToRelpath("file:///repo-backup/a.go"); got != "/repo-backup/a.go" {
+		t.Fatalf("sibling dir = %q, want /repo-backup/a.go", got)
+	}
+	// The root itself maps to the empty relative path.
+	if got := s.uriToRelpath("file:///repo"); got != "" {
+		t.Fatalf("root itself = %q, want empty", got)
+	}
 }
 
 func TestExtractSelection(t *testing.T) {
@@ -183,6 +185,56 @@ func TestExtractSelection(t *testing.T) {
 	}
 	if got := extractSelection("hi\n", lsp.Range{Start: lsp.Position{Line: 0}, End: lsp.Position{Line: 0, Character: 999}}); got != "hi" {
 		t.Errorf("clamped = %q, want hi", got)
+	}
+	// Character offsets are UTF-16 code units, not bytes: selecting "llo" from
+	// "héllo" spans UTF-16 offsets 2..5 even though é is two bytes.
+	if got := extractSelection("héllo\n", lsp.Range{Start: lsp.Position{Line: 0, Character: 2}, End: lsp.Position{Line: 0, Character: 5}}); got != "llo" {
+		t.Errorf("utf16 selection = %q, want llo", got)
+	}
+	// A surrogate pair (emoji) counts as two UTF-16 units; selecting the "b"
+	// after it must land past all four bytes of the emoji.
+	if got := extractSelection("a😀b\n", lsp.Range{Start: lsp.Position{Line: 0, Character: 3}, End: lsp.Position{Line: 0, Character: 4}}); got != "b" {
+		t.Errorf("emoji selection = %q, want b", got)
+	}
+	// Multi-line selection with multi-byte runes on both the start and end
+	// lines exercises the UTF-16 conversion in the multi-line branch.
+	if got := extractSelection("héllo\nwörld\n", lsp.Range{Start: lsp.Position{Line: 0, Character: 2}, End: lsp.Position{Line: 1, Character: 3}}); got != "llo\nwör" {
+		t.Errorf("multi-line utf16 selection = %q, want \"llo\\nwör\"", got)
+	}
+}
+
+func TestUTF16OffsetToByte(t *testing.T) {
+	// "a😀b": bytes a=0, 😀=1..4 (4 bytes), b=5, len 6.
+	// UTF-16 units:  a=1, 😀=2, b=1.
+	// "héllo": bytes h=0, é=1..2 (2 bytes), l=3, l=4, o=5, len 6.
+	cases := []struct {
+		name   string
+		line   string
+		offset int
+		want   int
+	}{
+		{"negative clamps to 0", "abc", -3, 0},
+		{"zero", "abc", 0, 0},
+		{"ascii mid", "abc", 2, 2},
+		{"ascii past end clamps to len", "abc", 99, 3},
+		{"empty line", "", 5, 0},
+
+		{"before emoji", "a😀b", 1, 1},
+		{"inside surrogate pair rounds up", "a😀b", 2, 5},
+		{"after emoji", "a😀b", 3, 5},
+		{"end after emoji", "a😀b", 4, 6},
+		{"past end after emoji", "a😀b", 100, 6},
+
+		{"start of 2-byte rune", "héllo", 1, 1},
+		{"after 2-byte rune", "héllo", 2, 3},
+		{"end of 2-byte line", "héllo", 5, 6},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := utf16OffsetToByte(c.line, c.offset); got != c.want {
+				t.Fatalf("utf16OffsetToByte(%q, %d) = %d, want %d", c.line, c.offset, got, c.want)
+			}
+		})
 	}
 }
 
@@ -355,7 +407,7 @@ func TestHandleInitialize(t *testing.T) {
 	}
 	cmds := res.Capabilities.ExecuteCommandProvider.Commands
 	for _, want := range []string{"prlsp.resolveReviewThread", "prlsp.unresolveReviewThread", "prlsp.refreshReviewThreads"} {
-		if !containsStr(cmds, want) {
+		if !slices.Contains(cmds, want) {
 			t.Errorf("capabilities missing command %q (got %v)", want, cmds)
 		}
 	}
@@ -376,14 +428,104 @@ func TestCodeActionResolveVsUnresolve(t *testing.T) {
 	}
 
 	open := codeActionCommands(t, s, "T_open")
-	if !containsStr(open, "prlsp.resolveReviewThread") || containsStr(open, "prlsp.unresolveReviewThread") {
+	if !slices.Contains(open, "prlsp.resolveReviewThread") || slices.Contains(open, "prlsp.unresolveReviewThread") {
 		t.Errorf("unresolved thread commands = %v", open)
 	}
 
 	done := codeActionCommands(t, s, "T_done")
-	if !containsStr(done, "prlsp.unresolveReviewThread") || containsStr(done, "prlsp.resolveReviewThread") {
+	if !slices.Contains(done, "prlsp.unresolveReviewThread") || slices.Contains(done, "prlsp.resolveReviewThread") {
 		t.Errorf("resolved thread commands = %v", done)
 	}
+}
+
+func TestCodeActionSingleVsMultiLineComment(t *testing.T) {
+	newServer := func() (*Server, string) {
+		s, _ := newBufServer(&github.ClientMock{})
+		s.gitInfo = &git.Info{Owner: "octo", Repo: "repo", Root: "/repo"}
+		s.prNumber = 1
+		s.headSHA = "headsha"
+		uri := "file:///repo/a.go"
+		s.docs[uri] = "line0\nline1\nline2\n"
+		return s, uri
+	}
+
+	// Runs handleCodeAction over the given range and returns the emitted
+	// "create" review-comment action.
+	createAction := func(t *testing.T, s *Server, uri string, r lsp.Range) lsp.CodeAction {
+		t.Helper()
+		var buf bytes.Buffer
+		s.conn = jsonrpc.New(strings.NewReader(""), &buf)
+		params, _ := json.Marshal(lsp.CodeActionParams{
+			TextDocument: lsp.TextDocumentIdentifier{URI: uri},
+			Range:        r,
+		})
+		id := json.RawMessage("1")
+		s.handleCodeAction(&id, params)
+		for _, m := range readFrames(t, &buf) {
+			if m.ID == nil {
+				continue
+			}
+			var actions []lsp.CodeAction
+			if err := json.Unmarshal(m.Result, &actions); err != nil {
+				t.Fatalf("decode actions: %v", err)
+			}
+			for _, a := range actions {
+				if a.Command != nil && strings.HasPrefix(a.Command.Command, "prlsp.createReviewComment") {
+					return a
+				}
+			}
+		}
+		t.Fatal("no create-review-comment action emitted")
+		return lsp.CodeAction{}
+	}
+
+	t.Run("single line", func(t *testing.T) {
+		s, uri := newServer()
+		a := createAction(t, s, uri, lsp.Range{
+			Start: lsp.Position{Line: 1, Character: 0},
+			End:   lsp.Position{Line: 1, Character: 5},
+		})
+		if a.Command.Command != "prlsp.createReviewComment" {
+			t.Fatalf("command = %q, want prlsp.createReviewComment", a.Command.Command)
+		}
+		// Arguments: [uri, line, body]; line is 1-indexed.
+		if got := a.Command.Arguments[1].(float64); got != 2 {
+			t.Fatalf("line = %v, want 2", got)
+		}
+	})
+
+	t.Run("multi line", func(t *testing.T) {
+		s, uri := newServer()
+		a := createAction(t, s, uri, lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 0},
+			End:   lsp.Position{Line: 2, Character: 5},
+		})
+		if a.Command.Command != "prlsp.createReviewCommentRange" {
+			t.Fatalf("command = %q, want prlsp.createReviewCommentRange", a.Command.Command)
+		}
+		// Arguments: [uri, startLine, endLine, body]; both 1-indexed.
+		if got := a.Command.Arguments[1].(float64); got != 1 {
+			t.Fatalf("startLine = %v, want 1", got)
+		}
+		if got := a.Command.Arguments[2].(float64); got != 3 {
+			t.Fatalf("endLine = %v, want 3", got)
+		}
+	})
+
+	t.Run("multi line ending at column zero", func(t *testing.T) {
+		s, uri := newServer()
+		// A selection ending at the start of line 2 only covers lines 0-1.
+		a := createAction(t, s, uri, lsp.Range{
+			Start: lsp.Position{Line: 0, Character: 0},
+			End:   lsp.Position{Line: 2, Character: 0},
+		})
+		if a.Command.Command != "prlsp.createReviewCommentRange" {
+			t.Fatalf("command = %q, want prlsp.createReviewCommentRange", a.Command.Command)
+		}
+		if got := a.Command.Arguments[2].(float64); got != 2 {
+			t.Fatalf("endLine = %v, want 2", got)
+		}
+	})
 }
 
 // --- executeCommand / cmd* ---
@@ -520,5 +662,28 @@ func TestRefreshThreadsNoOpWithoutPR(t *testing.T) {
 	s.refreshThreads()
 	if s.threads != nil {
 		t.Fatalf("refreshThreads should be a no-op without a PR, got %v", s.threads)
+	}
+}
+
+// errFetchClient reuses the mock but fails every FetchReviewThreads call.
+type errFetchClient struct {
+	*github.ClientMock
+}
+
+func (errFetchClient) FetchReviewThreads(owner, repo string, pr int) ([]github.ReviewThread, error) {
+	return nil, errors.New("gh unavailable")
+}
+
+func TestRefreshThreadsKeepsCacheOnError(t *testing.T) {
+	s, _ := newBufServer(errFetchClient{&github.ClientMock{}})
+	s.gitInfo = &git.Info{Owner: "octo", Repo: "repo", Root: "/repo"}
+	s.prNumber = 1
+	cached := []github.ReviewThread{{ThreadID: "T1", Path: "a.go", Line: 1}}
+	s.threads = cached
+
+	s.refreshThreads()
+
+	if len(s.threads) != 1 || s.threads[0].ThreadID != "T1" {
+		t.Fatalf("threads = %v, want cached threads kept on fetch error", s.threads)
 	}
 }

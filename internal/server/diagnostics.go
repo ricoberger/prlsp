@@ -25,10 +25,21 @@ func uriToPath(uri string) string {
 	return uri
 }
 
+// uriToRelpath converts a document URI to a repo-relative path. It reads
+// s.gitInfo and must be called with s.mu held.
 func (s *Server) uriToRelpath(uri string) string {
 	path := uriToPath(uri)
-	if s.gitInfo != nil && s.gitInfo.Root != "" && strings.HasPrefix(path, s.gitInfo.Root) {
-		return strings.TrimPrefix(path[len(s.gitInfo.Root):], "/")
+	if s.gitInfo == nil || s.gitInfo.Root == "" {
+		return path
+	}
+	root := s.gitInfo.Root
+	// Only strip the root when it matches on a path-component boundary, so a
+	// sibling directory such as "/repo-backup" is not mistaken for "/repo".
+	if path == root {
+		return ""
+	}
+	if strings.HasPrefix(path, root+"/") {
+		return path[len(root)+1:]
 	}
 	return path
 }
@@ -45,7 +56,8 @@ func makeDiagnostic(t *github.ReviewThread) lsp.Diagnostic {
 	line := max(t.Line-1, 0) // LSP is 0-indexed
 
 	// Structured comments let the client render a rich thread view without
-	// re-parsing the (compact, markdown-free) diagnostic message.
+	// re-parsing the diagnostic message, which is just the raw comment bodies
+	// joined with newlines.
 	comments := make([]map[string]any, 0, len(t.Comments))
 	for _, c := range t.Comments {
 		comments = append(comments, map[string]any{
@@ -79,7 +91,9 @@ func makeDiagnostic(t *github.ReviewThread) lsp.Diagnostic {
 	return lsp.Diagnostic{
 		Range: lsp.Range{
 			Start: lsp.Position{Line: line, Character: 0},
-			End:   lsp.Position{Line: line, Character: 1000},
+			// A large end character spans the whole line without having to
+			// measure its actual length.
+			End: lsp.Position{Line: line, Character: 1000},
 		},
 		Message:  makeThreadMessage(t),
 		Severity: severity,
@@ -88,6 +102,8 @@ func makeDiagnostic(t *github.ReviewThread) lsp.Diagnostic {
 	}
 }
 
+// publishFileDiagnostics sends the diagnostics for a single document. It reads
+// s.threads and s.gitInfo and must be called with s.mu held.
 func (s *Server) publishFileDiagnostics(uri string) {
 	rel := s.uriToRelpath(uri)
 	var diags []lsp.Diagnostic
@@ -106,11 +122,21 @@ func (s *Server) publishFileDiagnostics(uri string) {
 	})
 }
 
+// refreshThreads re-fetches the review threads for the current PR. It reads and
+// writes shared state and must be called with s.mu held. A failed fetch keeps
+// the previously loaded threads rather than clearing them.
 func (s *Server) refreshThreads() {
 	if s.gitInfo == nil || s.prNumber == 0 {
 		return
 	}
-	s.threads = s.gh.FetchReviewThreads(s.gitInfo.Owner, s.gitInfo.Repo, s.prNumber)
+	threads, err := s.gh.FetchReviewThreads(s.gitInfo.Owner, s.gitInfo.Repo, s.prNumber)
+	if err != nil {
+		// Keep the previously fetched threads so a transient gh failure does
+		// not wipe the diagnostics already shown to the user.
+		log.Printf("failed to fetch review threads, keeping %d cached: %v", len(s.threads), err)
+		return
+	}
+	s.threads = threads
 	unresolved := 0
 	for _, t := range s.threads {
 		if !t.IsResolved {

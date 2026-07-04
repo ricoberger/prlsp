@@ -12,6 +12,9 @@ func (s *Server) handleCodeAction(id *json.RawMessage, params json.RawMessage) {
 	var p lsp.CodeActionParams
 	json.Unmarshal(params, &p)
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var actions []lsp.CodeAction
 	uri := p.TextDocument.URI
 
@@ -111,19 +114,39 @@ func (s *Server) handleCodeAction(id *json.RawMessage, params json.RawMessage) {
 			})
 		}
 
-		// Create new review comment.
+		// Create new review comment. A multi-line selection posts a ranged
+		// comment; a single-line selection posts a single-line comment.
 		if s.gitInfo != nil && s.prNumber != 0 && s.headSHA != "" {
-			targetLine := p.Range.Start.Line + 1 // 1-indexed for GitHub
-			title := fmt.Sprintf("New review comment on L%d", targetLine)
-			actions = append(actions, lsp.CodeAction{
-				Title: title,
-				Kind:  lsp.CodeActionQuickFix,
-				Command: &lsp.Command{
-					Title:     title,
-					Command:   "prlsp.createReviewComment",
-					Arguments: []any{uri, targetLine, selected},
-				},
-			})
+			startLine := p.Range.Start.Line + 1 // 1-indexed for GitHub
+			endLine := p.Range.End.Line + 1
+			// A selection whose end sits at column 0 does not actually cover
+			// that trailing line.
+			if p.Range.End.Character == 0 && p.Range.End.Line > p.Range.Start.Line {
+				endLine = p.Range.End.Line
+			}
+			if endLine > startLine {
+				title := fmt.Sprintf("New review comment on L%d-L%d", startLine, endLine)
+				actions = append(actions, lsp.CodeAction{
+					Title: title,
+					Kind:  lsp.CodeActionQuickFix,
+					Command: &lsp.Command{
+						Title:     title,
+						Command:   "prlsp.createReviewCommentRange",
+						Arguments: []any{uri, startLine, endLine, selected},
+					},
+				})
+			} else {
+				title := fmt.Sprintf("New review comment on L%d", startLine)
+				actions = append(actions, lsp.CodeAction{
+					Title: title,
+					Kind:  lsp.CodeActionQuickFix,
+					Command: &lsp.Command{
+						Title:     title,
+						Command:   "prlsp.createReviewComment",
+						Arguments: []any{uri, startLine, selected},
+					},
+				})
+			}
 		}
 	}
 

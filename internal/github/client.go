@@ -55,7 +55,7 @@ func (c *Client) FindPR(owner, repo, branch string) (int, string, bool) {
 	return prs[0].Number, prs[0].HeadRefOid, true
 }
 
-func (c *Client) FetchReviewThreads(owner, repo string, pr int) []ReviewThread {
+func (c *Client) FetchReviewThreads(owner, repo string, pr int) ([]ReviewThread, error) {
 	out, err := runGH([]string{
 		"api", "graphql",
 		"-f", fmt.Sprintf("query=%s", threadsQuery),
@@ -64,9 +64,9 @@ func (c *Client) FetchReviewThreads(owner, repo string, pr int) []ReviewThread {
 		"-F", fmt.Sprintf("pr=%d", pr),
 	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return parseReviewThreads(out)
+	return parseReviewThreads(out), nil
 }
 
 // parseReviewThreads decodes the GraphQL reviewThreads response.
@@ -186,6 +186,9 @@ func (c *Client) ReplyToReviewComment(owner, repo string, pr, commentID int, bod
 }
 
 func (c *Client) CreateReviewComment(owner, repo string, pr int, commitID, path string, line int, body string) bool {
+	if line <= 0 {
+		return false
+	}
 	payload, _ := json.Marshal(map[string]any{
 		"commit_id": commitID,
 		"body":      "",

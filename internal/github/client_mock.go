@@ -33,8 +33,8 @@ func (c *ClientMock) FindPR(owner, repo, branch string) (int, string, bool) {
 	return 1, "mock_sha", true
 }
 
-func (c *ClientMock) FetchReviewThreads(owner, repo string, pr int) []ReviewThread {
-	return c.Threads
+func (c *ClientMock) FetchReviewThreads(owner, repo string, pr int) ([]ReviewThread, error) {
+	return c.Threads, nil
 }
 
 func (c *ClientMock) ResolveReviewThread(threadID string) bool {
@@ -74,6 +74,9 @@ func (c *ClientMock) ReplyToReviewComment(owner, repo string, pr, commentID int,
 }
 
 func (c *ClientMock) CreateReviewComment(owner, repo string, pr int, commitID, path string, line int, body string) bool {
+	if line <= 0 {
+		return false
+	}
 	c.nextID++
 	id := c.nextID
 	c.Threads = append(c.Threads, ReviewThread{
@@ -87,6 +90,10 @@ func (c *ClientMock) CreateReviewComment(owner, repo string, pr int, commitID, p
 }
 
 func (c *ClientMock) CreateReviewCommentRange(owner, repo string, pr int, commitID, path string, startLine, endLine int, body string) bool {
-	line := max(startLine, endLine)
-	return c.CreateReviewComment(owner, repo, pr, commitID, path, line, body)
+	// Mirror the real client's validation so tests exercise the same rules.
+	if startLine <= 0 || endLine <= 0 || startLine > endLine {
+		return false
+	}
+	// GitHub anchors a multi-line comment to its end line.
+	return c.CreateReviewComment(owner, repo, pr, commitID, path, endLine, body)
 }

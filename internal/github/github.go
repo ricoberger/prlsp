@@ -8,7 +8,12 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// ghTimeout bounds each gh invocation so a hung gh process (or a stalled
+// network call it makes) cannot block the caller indefinitely.
+const ghTimeout = 30 * time.Second
 
 type ReviewComment struct {
 	DatabaseID int    `json:"database_id"`
@@ -29,7 +34,7 @@ type ReviewThread struct {
 // implemented by Client (real) and ClientMock (test double).
 type Service interface {
 	FindPR(owner, repo, branch string) (prNumber int, headSHA string, ok bool)
-	FetchReviewThreads(owner, repo string, pr int) []ReviewThread
+	FetchReviewThreads(owner, repo string, pr int) ([]ReviewThread, error)
 	ResolveReviewThread(threadID string) bool
 	UnresolveReviewThread(threadID string) bool
 	ReplyToReviewComment(owner, repo string, pr, commentID int, body string) bool
@@ -38,7 +43,9 @@ type Service interface {
 }
 
 func runGH(args []string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "gh", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -55,7 +62,9 @@ func runGH(args []string) (string, error) {
 // output. Arguments are passed as a slice so no dynamic string is interpolated
 // directly into the command invocation.
 func runGHInput(args []string, input string) (string, error) {
-	cmd := exec.CommandContext(context.Background(), "gh", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(input)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
