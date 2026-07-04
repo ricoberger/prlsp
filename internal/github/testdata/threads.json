@@ -1,0 +1,30 @@
+{
+  "threads": [
+    {
+      "thread_id": "T_unresolved",
+      "path": "main.go",
+      "line": 10,
+      "is_resolved": false,
+      "comments": [
+        {
+          "database_id": 1,
+          "body": "please fix this",
+          "author": "alice"
+        }
+      ]
+    },
+    {
+      "thread_id": "T_resolved",
+      "path": "main.go",
+      "line": 20,
+      "is_resolved": true,
+      "comments": [
+        {
+          "database_id": 2,
+          "body": "done",
+          "author": "bob"
+        }
+      ]
+    }
+  ]
+}
